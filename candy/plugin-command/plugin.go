@@ -13,13 +13,17 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"os/exec"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/opencharly/plugin-command/candy/plugin-command/params"
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
 	pb "github.com/opencharly/spec/proto"
+	"github.com/opencharly/spec/shellquote"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -60,6 +64,17 @@ func (verb) RunVerb(ctx context.Context, cc kit.CheckContext, op *spec.Op) kit.R
 		inContainer = false
 	}
 
+	// The step's env: modifier (a base #Op field) is applied to the executed
+	// command as shell exports. RCA: the field was schema-declared but no executor
+	// path ever read it — the command ran with the container's default env, so an
+	// env-scoped probe (e.g. OMARCHY_PATH=/tmp/missing-omarchy) silently tested
+	// the wrong configuration. Prepend exports so both the in-container and
+	// host-side legs see the step env; values are shell-quoted (spec.ShellQuote).
+	cmd := in.Command
+	if len(op.Env) > 0 {
+		cmd = envExports(op.Env) + cmd
+	}
+
 	// Background path — host-side only, fire-and-forget. Plan teardown reaps via SIGTERM.
 	if in.Background {
 		if inContainer {
@@ -68,14 +83,14 @@ func (verb) RunVerb(ctx context.Context, cc kit.CheckContext, op *spec.Op) kit.R
 		if cc.Mode() == kit.ModeBox {
 			return kit.Skip("background command not meaningful under charly check box")
 		}
-		cmd := exec.Command("sh", "-c", in.Command) // not CommandContext — survives ctx cancel
-		if err := cmd.Start(); err != nil {
+		c := exec.Command("sh", "-c", cmd) // not CommandContext — survives ctx cancel
+		if err := c.Start(); err != nil {
 			return kit.Failf("background start: %v", err)
 		}
-		cc.AddBackground(cmd.Process.Pid)
+		cc.AddBackground(c.Process.Pid)
 		// Reap asynchronously so a kill: SIGKILL doesn't leave a zombie.
-		go func() { _ = cmd.Wait() }()
-		return kit.Passf("backgrounded pid=%d", cmd.Process.Pid)
+		go func() { _ = c.Wait() }()
+		return kit.Passf("backgrounded pid=%d", c.Process.Pid)
 	}
 
 	var stdout, stderr string
@@ -83,12 +98,12 @@ func (verb) RunVerb(ctx context.Context, cc kit.CheckContext, op *spec.Op) kit.R
 	var err error
 	started := time.Now()
 	if inContainer {
-		stdout, stderr, exitCode, err = cc.Exec().RunCapture(ctx, wrapContainerCommand(in.Command))
+		stdout, stderr, exitCode, err = cc.Exec().RunCapture(ctx, wrapContainerCommand(cmd))
 	} else {
 		if cc.Mode() == kit.ModeBox {
 			return kit.Skip("host-side command not meaningful under charly check box")
 		}
-		c := exec.CommandContext(ctx, "sh", "-c", in.Command)
+		c := exec.CommandContext(ctx, "sh", "-c", cmd)
 		stdout, stderr, exitCode, err = captureCmd(c)
 	}
 	elapsed := time.Since(started)
@@ -146,6 +161,26 @@ func (verb) RunVerb(ctx context.Context, cc kit.CheckContext, op *spec.Op) kit.R
 // deadline can land before the child's status is observed.
 func killedByCeiling(ctx context.Context, exitCode int) bool {
 	return ctx.Err() != nil || exitCode == -1
+}
+
+// envExports renders the step's env: modifier as shell export lines, so the
+// executed command sees the step env. Values are shell-quoted (spec.ShellQuote)
+// so a value with spaces or metacharacters survives interpolation. Deterministic
+// order (sorted keys) keeps the emitted script stable across runs.
+func envExports(env map[string]string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "export %s=%s\n", k, shellquote.ShellQuote(env[k]))
+	}
+	return b.String()
 }
 
 // wrapContainerCommand is the shared kit helper (FU-11 — formerly duplicated in core + plugins).

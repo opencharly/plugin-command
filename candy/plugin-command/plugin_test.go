@@ -190,6 +190,53 @@ func TestCommandVerb_NormalExitIsUnaffected(t *testing.T) {
 // matcher. Relocated from charly/plugin_command_relocated_test.go's
 // TestRelocatedCommandVerb_DispatchesViaKit (the check-role behavior half; the dispatch
 // wiring stays in charly).
+// recordingExec is a kit.Executor that records the script it was asked to run,
+// so a test can assert the step env: modifier was prepended as shell exports.
+type recordingExec struct {
+	script string
+}
+
+func (r *recordingExec) RunCapture(_ context.Context, script string) (string, string, int, error) {
+	r.script = script
+	return "", "", 0, nil
+}
+func (r *recordingExec) Kind() string { return "container" }
+
+// TestCommandVerb_StepEnvReachesCommand proves the step's env: modifier (a base
+// #Op field) is applied to the executed command as shell exports — the RCA fix
+// for the schema-declared-but-never-wired env field. The in-container leg must
+// see `export KEY='value'` prepended to the command.
+func TestCommandVerb_StepEnvReachesCommand(t *testing.T) {
+	rec := &recordingExec{}
+	cc := &fakeCC{mode: kit.ModeLive, exec: rec}
+	op := &spec.Op{
+		PluginInput: map[string]any{"command": "test \"$TEST_ENV_VAR\" = \"hello env\""},
+		Env:         map[string]string{"TEST_ENV_VAR": "hello env"},
+	}
+	res := verb{}.RunVerb(context.Background(), cc, op)
+	if res.Status != kit.StatusPass {
+		t.Fatalf("env-scoped command: want pass, got %v: %s", res.Status, res.Message)
+	}
+	if !strings.Contains(rec.script, "export TEST_ENV_VAR='hello env'") {
+		t.Fatalf("env-scoped command: script missing the env export, got: %s", rec.script)
+	}
+}
+
+// TestCommandVerb_NoEnvLeavesCommandUntouched proves a step without env: is
+// passed through unchanged (no spurious exports).
+func TestCommandVerb_NoEnvLeavesCommandUntouched(t *testing.T) {
+	rec := &recordingExec{}
+	cc := &fakeCC{mode: kit.ModeLive, exec: rec}
+	op := &spec.Op{PluginInput: map[string]any{"command": "echo plain"}}
+	res := verb{}.RunVerb(context.Background(), cc, op)
+	if res.Status != kit.StatusPass {
+		t.Fatalf("plain command: want pass, got %v: %s", res.Status, res.Message)
+	}
+	if strings.Contains(rec.script, "export ") {
+		t.Fatalf("plain command: script unexpectedly has env exports, got: %s", rec.script)
+	}
+}
+
 func TestCommandVerb_HostSideForeground(t *testing.T) {
 	res := verb{}.RunVerb(context.Background(), &fakeCC{mode: kit.ModeLive},
 		&spec.Op{PluginInput: map[string]any{"command": "echo charly-cmd-ok", "from_host": true},

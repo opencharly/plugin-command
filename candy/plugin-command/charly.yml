@@ -1,7 +1,5 @@
-version: 2026.232.0520
 plugin-command:
     candy:
-        version: 2026.176.2800
         description: |-
             The `command` check verb relocated into a candy: run a shell command
             in-container (via the live check engine), host-side (os/exec under charly

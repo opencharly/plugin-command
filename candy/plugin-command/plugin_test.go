@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -256,5 +257,72 @@ func TestCommandVerb_Background(t *testing.T) {
 		&spec.Op{PluginInput: map[string]any{"command": "sleep 0.2", "from_host": true, "background": true}})
 	if res.Status != kit.StatusPass || !strings.Contains(res.Message, "backgrounded") {
 		t.Fatalf("background: want pass + backgrounded, got %v: %s", res.Status, res.Message)
+	}
+}
+
+// TestCommandVerb_PassCarriesStdout: a PASSING command's result carries its captured stdout as
+// CapturedValue, so a downstream step can read this step's output (the workflow-IR `$id.stdout`
+// / `$id.json` hand-off) instead of the verb discarding it once its matchers have run. Before
+// this change the PASS return was a bare kit.Passf that dropped stdout entirely.
+func TestCommandVerb_PassCarriesStdout(t *testing.T) {
+	const out = "hello from stdout\n"
+	res := runCommandVerbOut(out, 0, map[string]any{"command": "echo hello from stdout"})
+	if res.Status != kit.StatusPass {
+		t.Fatalf("want pass, got %v: %s", res.Status, res.Message)
+	}
+	if res.CapturedValue != out {
+		t.Fatalf("CapturedValue = %q, want the captured stdout %q", res.CapturedValue, out)
+	}
+	if !strings.Contains(res.Message, "exit=0") {
+		t.Errorf("message = %q, want the unchanged exit=N text a matcher may key on", res.Message)
+	}
+}
+
+// TestCommandVerb_FailCarriesNoStdout: a FAILING command's result carries NO CapturedValue.
+// Only a PASS is a value a downstream step may consume — a failed step's output was never
+// vouched for, and stashing it would let a consumer act on output the step itself rejected.
+func TestCommandVerb_FailCarriesNoStdout(t *testing.T) {
+	res := runCommandVerbOut("boom on stdout\n", 1, map[string]any{"command": "false"})
+	if res.Status != kit.StatusFail {
+		t.Fatalf("want fail, got %v: %s", res.Status, res.Message)
+	}
+	if res.CapturedValue != "" {
+		t.Fatalf("CapturedValue = %q, want empty — a fail path must not stash output", res.CapturedValue)
+	}
+}
+
+// TestCommandVerb_StdoutTruncatedAtCeiling: stdout over the 1 MiB cap is stored truncated to
+// exactly 1 MiB and the truncation is NAMED in Message — a silent truncation would be a value
+// the consumer cannot distinguish from the real output, i.e. a fake.
+func TestCommandVerb_StdoutTruncatedAtCeiling(t *testing.T) {
+	const cap1MiB = 1 << 20
+	big := strings.Repeat("x", cap1MiB+123)
+	res := runCommandVerbOut(big, 0, map[string]any{"command": "big-output"})
+	if res.Status != kit.StatusPass {
+		t.Fatalf("want pass, got %v: %s", res.Status, res.Message)
+	}
+	if len(res.CapturedValue) != cap1MiB {
+		t.Fatalf("CapturedValue len = %d, want exactly %d (1 MiB)", len(res.CapturedValue), cap1MiB)
+	}
+	for _, want := range []string{"exit=0", "truncated", fmt.Sprintf("%d bytes", len(big))} {
+		if !strings.Contains(res.Message, want) {
+			t.Errorf("message = %q, want it to contain %q so the truncation is visible, not silent", res.Message, want)
+		}
+	}
+}
+
+// TestCommandVerb_StdoutBelowCapUntruncated: the cap is a bound, not a floor — stdout under
+// 1 MiB is stored whole and Message keeps the plain exit=N text (no spurious truncation note).
+func TestCommandVerb_StdoutBelowCapUntruncated(t *testing.T) {
+	const out = "small output\n"
+	res := runCommandVerbOut(out, 0, map[string]any{"command": "small"})
+	if res.Status != kit.StatusPass {
+		t.Fatalf("want pass, got %v: %s", res.Status, res.Message)
+	}
+	if res.CapturedValue != out {
+		t.Fatalf("CapturedValue = %q, want the whole under-cap stdout %q", res.CapturedValue, out)
+	}
+	if strings.Contains(res.Message, "truncated") {
+		t.Errorf("message = %q, want no truncation note for under-cap output", res.Message)
 	}
 }

@@ -47,6 +47,12 @@ type verb struct{}
 
 func (verb) Reserved() string { return "command" }
 
+// maxCapturedStdout bounds the stdout a PASS result stashes in CapturedValue at 1 MiB. A probe
+// can emit unbounded output and the result travels the check-run ledger and the out-of-process
+// verb wire, so the value is capped. See the return path in RunVerb for why over-cap output is
+// truncated visibly rather than silently.
+const maxCapturedStdout = 1 << 20
+
 // RunVerb runs the command via the live CheckContext and asserts exit/stdout/stderr.
 // in-container (default) via cc.Exec; host-side (from_host / in_container:false) via
 // os/exec under ModeLive; background (host-side, fire-and-forget) registers the PID with
@@ -150,7 +156,23 @@ func (verb) RunVerb(ctx context.Context, cc kit.CheckContext, op *spec.Op) kit.R
 	if err := sdk.MatchAll(stderr, op.Stderr); err != nil {
 		return kit.Failf("stderr: %v (got: %s)", err, trimPreview(stderr))
 	}
-	return kit.Passf("exit=%d", exitCode)
+	// The captured stdout rides the PASS result as CapturedValue so a downstream step can read
+	// this step's output (the workflow-IR `$id.json` / `$id.stdout` hand-off) instead of the verb
+	// discarding it once its matchers have run. PASS ONLY: a Failf/Skip return above leaves
+	// CapturedValue empty on purpose — a failed step's output was never vouched for, and a
+	// consumer that read it would be acting on a value the step itself rejected.
+	//
+	// Bounded at maxCapturedStdout: over-cap output is truncated and the truncation is NAMED in
+	// Message (never silent), because a silently shortened value is a fake the consumer cannot
+	// detect. The exit= prefix is preserved so anything keying on it still matches.
+	res := kit.Passf("exit=%d", exitCode)
+	if len(stdout) > maxCapturedStdout {
+		res.CapturedValue = stdout[:maxCapturedStdout]
+		res.Message = fmt.Sprintf("exit=%d; stdout truncated to 1MiB of %d bytes", exitCode, len(stdout))
+	} else {
+		res.CapturedValue = stdout
+	}
+	return res
 }
 
 // killedByCeiling reports whether a completed exec was cut short by the never-hang ceiling rather

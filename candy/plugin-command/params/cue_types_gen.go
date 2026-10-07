@@ -7,10 +7,10 @@ package params
 // It is the SINGLE SOURCE for this plugin's params, used two ways (the same contract
 // the reference examplerunverb and core `spec` use):
 //
-//  1. GENERATE the Go param struct — `cue exp gengotypes` (driven by task cue:gen,
-//     which wraps this with `package params` + `@go(params)`) emits
-//     ../params/cue_types_gen.go, so the provider decodes plugin_input into a TYPED
-//     struct, never a hand-parsed map.
+//  1. GENERATE the Go param struct — the schema→Go pipeline concatenates this file
+//     under a `package params` + `@go(params)` header and generates the Go struct from
+//     it, writing ../params/cue_types_gen.go, so the provider decodes plugin_input into
+//     a TYPED struct, never a hand-parsed map. Never hand-edit the generated file.
 //  2. VALIDATE authored input AT RUNTIME — the builtin serves this source over the
 //     Describe channel (InProcTransport) exactly like an external serves it over
 //     gRPC; the host splices it onto the base (base ++ plugin) and validates every

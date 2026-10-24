@@ -48,4 +48,26 @@
 	// mutually-exclusive intents: exact-code vs any-non-zero). Default false =
 	// the historic behaviour (assert exit_status, defaulting to 0).
 	expect_non_zero?: bool @go(ExpectNonZero)
+	// skip_exit — declare that THIS step's command reports "the phase ran nothing"
+	// by exiting with the org's skip code: the check 0/1/2/3 convention's 3
+	// (github.com/opencharly/spec/exitcode — "the phase RAN NOTHING — neither a
+	// pass nor a failure"), re-exported as sdk.CheckSkippedExitCode. Only that
+	// code is accepted: a step declares the ORG's code, never a private one, so
+	// "3" means the same thing in a task step as it does in the check runner.
+	//
+	// A command that exits this code is SKIPPED, not failed: it proved nothing and
+	// disproved nothing, so it must mint neither a red nor a green. The
+	// stdout/stderr matchers do NOT run for a skipped step — a step that ran
+	// nothing has no output to assert on.
+	//
+	// OPT-IN, and it stays opt-in: a command that exits 3 WITHOUT this declaration
+	// is a command whose exit code the author never interpreted, and reading it as
+	// a skip would silently turn a real failure into a non-failure.
+	//
+	// PRECEDENCE: the skip is read FIRST. A step that declares skip_exit together
+	// with expect_non_zero therefore means "exit this code → skipped; any other
+	// non-zero → passed" — a wildcard narrowed by an exact exception. Only an
+	// EXACT-code contradiction is refused (skip_exit and exit_status naming the
+	// SAME code), because one code cannot be both the pass and the skip.
+	skip_exit?: int @go(SkipExit,type=*int)
 }

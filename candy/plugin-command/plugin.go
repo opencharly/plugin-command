@@ -70,6 +70,35 @@ func (verb) RunVerb(ctx context.Context, cc kit.CheckContext, op *spec.Op) kit.R
 		inContainer = false
 	}
 
+	// skip_exit — the author declares that this command reports "the phase ran
+	// nothing" with the org's skip code (spec/exitcode: "the phase RAN NOTHING —
+	// neither a pass nor a failure"), so the step is SKIPPED instead of failed.
+	// The declaration is VALIDATED, not trusted:
+	//
+	//   - only the org's code is accepted: a step that invented a private code
+	//     would make "3" mean two different things across the org;
+	//   - a declaration that contradicts the step's own exit_status assertion is
+	//     refused rather than silently overriding it — a step cannot both PASS
+	//     and SKIP on one exit code;
+	//   - a backgrounded command has no exit status to interpret, so a skip code
+	//     declared there would be silently inert.
+	//
+	// The declaration is checked BEFORE the command runs, so an authoring error
+	// never runs a probe.
+	if in.SkipExit != nil {
+		if *in.SkipExit != sdk.CheckSkippedExitCode {
+			return kit.Failf("skip_exit=%d is not the org's skip code (%d) — a step declares the org's code, never a private one",
+				*in.SkipExit, sdk.CheckSkippedExitCode)
+		}
+		if op.ExitStatus != nil && *op.ExitStatus == *in.SkipExit {
+			return kit.Failf("skip_exit and exit_status both declare %d — the step cannot both PASS and SKIP on one exit code",
+				*in.SkipExit)
+		}
+		if in.Background {
+			return kit.Failf("skip_exit with background: true — a backgrounded command has no exit status to interpret")
+		}
+	}
+
 	// The step's env: modifier (a base #Op field) is applied to the executed
 	// command as shell exports. RCA: the field was schema-declared but no executor
 	// path ever read it — the command ran with the container's default env, so an
@@ -132,6 +161,22 @@ func (verb) RunVerb(ctx context.Context, cc kit.CheckContext, op *spec.Op) kit.R
 	if killedByCeiling(ctx, exitCode) {
 		return kit.Failf("probe killed by never-hang ceiling after %s (no exit status — the process was signalled, not returned); command: %s",
 			elapsed.Round(time.Millisecond), trimPreview(in.Command))
+	}
+
+	// The skip code — the ONE channel a step has for saying "the phase ran
+	// nothing". A command that exits it neither proved nor disproved its
+	// assertion, so the step is SKIPPED: it must mint neither a red nor a green.
+	// It is read BEFORE the exit comparison (an exit the author declared as a
+	// skip is not a mismatch), and the stdout/stderr matchers do not run for it —
+	// a step that ran nothing has no output to assert on.
+	//
+	// PRECEDENCE, and it is the same one the schema states: the skip wins over
+	// expect_non_zero, so a step declaring both means "exit this code → skipped;
+	// any other non-zero → passed" (a wildcard narrowed by an exact exception).
+	// The exact-code contradiction (skip_exit and exit_status naming the SAME
+	// code) is refused above, before the command runs.
+	if in.SkipExit != nil && exitCode == *in.SkipExit {
+		return kit.Skipf("exit=%d — the step declared this code as 'the phase ran nothing' (skip_exit); it is neither a pass nor a failure", exitCode)
 	}
 
 	// expect_non_zero asserts the command FAILED (any non-zero code) and IGNORES

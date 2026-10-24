@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/spec/spec"
 )
@@ -324,5 +325,180 @@ func TestCommandVerb_StdoutBelowCapUntruncated(t *testing.T) {
 	}
 	if strings.Contains(res.Message, "truncated") {
 		t.Errorf("message = %q, want no truncation note for under-cap output", res.Message)
+	}
+}
+
+// --- the skip channel: skip_exit ---------------------------------------------
+//
+// The channel exists so a command can say "the phase ran nothing" with the org's
+// OWN exit code instead of a private one. The org's code is
+// sdk.CheckSkippedExitCode (spec/exitcode: "the phase RAN NOTHING — neither a
+// pass nor a failure") — it is read from the contract here, never written as a
+// literal, because a second statement of the contract is a second contract (R2).
+
+// TestCommandVerb_SkipExitIsSkipped proves the one thing the channel exists for:
+// a command that exits the org's skip code, on a step that DECLARES it, is
+// SKIPPED — neither a pass nor a failure.
+func TestCommandVerb_SkipExitIsSkipped(t *testing.T) {
+	code := sdk.CheckSkippedExitCode
+	res := runCommandVerb(code, map[string]any{"command": "exit 3", "skip_exit": code}, nil)
+	if res.Status != kit.StatusSkip {
+		t.Fatalf("status = %v, want skip — a step that declared skip_exit=%d ran nothing, so it is neither a pass nor a failure: %s",
+			res.Status, code, res.Message)
+	}
+	if !strings.Contains(res.Message, fmt.Sprintf("exit=%d", code)) {
+		t.Errorf("message = %q, want it to name the exit code the step ran out with", res.Message)
+	}
+}
+
+// TestCommandVerb_SkipExitIsOptIn is the NEGATIVE CONTROL, and the reason the
+// channel is opt-in: the SAME exit code on a step that does NOT declare it is
+// still a FAILURE. A command's exit code is the author's to interpret; reading
+// an undeclared 3 as a skip would turn a real failure into a non-failure.
+func TestCommandVerb_SkipExitIsOptIn(t *testing.T) {
+	res := runCommandVerb(sdk.CheckSkippedExitCode, map[string]any{"command": "exit 3"}, nil)
+	if res.Status != kit.StatusFail {
+		t.Fatalf("status = %v, want fail — an undeclared exit code is the author's to read, not the verb's", res.Status)
+	}
+	if !strings.Contains(res.Message, fmt.Sprintf("exit=%d", sdk.CheckSkippedExitCode)) {
+		t.Errorf("message = %q, want the actual exit code", res.Message)
+	}
+}
+
+// TestCommandVerb_SkipExitDoesNotSwallowOtherFailures proves the channel skips
+// EXACTLY the declared code: a step that declares skip_exit=3 and whose command
+// exits 1 is still a FAILURE.
+func TestCommandVerb_SkipExitDoesNotSwallowOtherFailures(t *testing.T) {
+	code := sdk.CheckSkippedExitCode
+	res := runCommandVerb(1, map[string]any{"command": "exit 1", "skip_exit": code}, nil)
+	if res.Status != kit.StatusFail {
+		t.Fatalf("status = %v, want fail — only the DECLARED code is a skip", res.Status)
+	}
+}
+
+// TestCommandVerb_SkipExitRejectsAPrivateCode proves the declaration is
+// validated, not trusted: a step that invents its own skip code is refused with
+// a message that names the org's code, so "3" cannot mean two things.
+func TestCommandVerb_SkipExitRejectsAPrivateCode(t *testing.T) {
+	res := runCommandVerb(0, map[string]any{"command": "true", "skip_exit": 7}, nil)
+	if res.Status != kit.StatusFail {
+		t.Fatalf("status = %v, want fail — a private skip code is an authoring error, not a channel", res.Status)
+	}
+	for _, want := range []string{"skip_exit=7", fmt.Sprintf("%d", sdk.CheckSkippedExitCode)} {
+		if !strings.Contains(res.Message, want) {
+			t.Errorf("message = %q, want it to name %q so the cause is readable without guessing", res.Message, want)
+		}
+	}
+}
+
+// TestCommandVerb_SkipExitContradictingExitStatusIsRefused proves a step cannot
+// both PASS and SKIP on one exit code: the contradiction is refused loudly
+// rather than resolved silently in favour of either reading.
+func TestCommandVerb_SkipExitContradictingExitStatusIsRefused(t *testing.T) {
+	code := sdk.CheckSkippedExitCode
+	res := runCommandVerb(code, map[string]any{"command": "exit 3", "skip_exit": code}, &code)
+	if res.Status != kit.StatusFail {
+		t.Fatalf("status = %v, want fail — skip_exit and exit_status both declare %d", res.Status, code)
+	}
+	if !strings.Contains(res.Message, "exit_status") {
+		t.Errorf("message = %q, want it to name the contradiction", res.Message)
+	}
+}
+
+// TestCommandVerb_SkipExitWithBackgroundIsRefused proves a declaration that
+// could never take effect is refused instead of being silently inert: a
+// backgrounded command has no exit status to interpret.
+func TestCommandVerb_SkipExitWithBackgroundIsRefused(t *testing.T) {
+	code := sdk.CheckSkippedExitCode
+	res := runCommandVerb(0, map[string]any{"command": "true", "skip_exit": code, "background": true}, nil)
+	if res.Status != kit.StatusFail {
+		t.Fatalf("status = %v, want fail — background: true has no exit status to skip on", res.Status)
+	}
+	if !strings.Contains(res.Message, "background") {
+		t.Errorf("message = %q, want it to name the contradiction", res.Message)
+	}
+}
+
+// TestCommandVerb_SkipExitShortCircuitsTheMatchers proves a skipped step's
+// stdout/stderr matchers do NOT run: a step that ran nothing has no output to
+// assert on, and a matcher that turned the skip back into a failure would
+// defeat the channel. The command's stdout is deliberately EMPTY here, which
+// no `contains` matcher could accept.
+func TestCommandVerb_SkipExitShortCircuitsTheMatchers(t *testing.T) {
+	code := sdk.CheckSkippedExitCode
+	res := verb{}.RunVerb(context.Background(), &fakeCC{mode: kit.ModeLive, exec: &fakeExec{stdout: "", exit: code}},
+		&spec.Op{PluginInput: map[string]any{"command": "exit 3", "skip_exit": code},
+			Stdout: spec.MatcherList{{Op: "contains", Value: "never printed"}}})
+	if res.Status != kit.StatusSkip {
+		t.Fatalf("status = %v, want skip — a step that ran nothing has no output to assert on: %s", res.Status, res.Message)
+	}
+}
+
+// TestCommandVerb_SkipExitCarriesNoStdout proves a SKIP stashes no value: like
+// a failure, a skipped step's output was never vouched for, and a consumer that
+// read it would be acting on a value the step itself declined to assert.
+func TestCommandVerb_SkipExitCarriesNoStdout(t *testing.T) {
+	code := sdk.CheckSkippedExitCode
+	res := runCommandVerbOut("output of a step that ran nothing\n", code, map[string]any{"command": "exit 3", "skip_exit": code})
+	if res.Status != kit.StatusSkip {
+		t.Fatalf("status = %v, want skip", res.Status)
+	}
+	if res.CapturedValue != "" {
+		t.Fatalf("CapturedValue = %q, want empty — a skip must not stash output", res.CapturedValue)
+	}
+}
+
+// --- the skip channel against a REAL process ---------------------------------
+//
+// The tests above drive the verb through a canned exit code, which is the file's
+// established fixture (and the right shape for the verb's branches). But the
+// boundary this verb actually crosses is a PROCESS: the step's command is a shell
+// command, and its exit code is what the channel reads. R8 says a boundary that
+// crosses a real service runs against that service and is never mocked, so the
+// channel is proven here against a real `sh -c` that really exits with the org's
+// skip code — the host-side leg (from_host: true) executes through os/exec, so
+// no executor is involved at all.
+
+// TestCommandVerb_SkipExitIsSkipped_Live proves the channel against a real
+// process: a command that really exits 3, on a step that declares the code, is
+// SKIPPED.
+func TestCommandVerb_SkipExitIsSkipped_Live(t *testing.T) {
+	code := sdk.CheckSkippedExitCode
+	res := verb{}.RunVerb(context.Background(), &fakeCC{mode: kit.ModeLive},
+		&spec.Op{PluginInput: map[string]any{"command": "exit 3", "from_host": true, "skip_exit": code}})
+	if res.Status != kit.StatusSkip {
+		t.Fatalf("status = %v, want skip — a real command that exited %d, on a step that declared it, ran nothing: %s",
+			res.Status, code, res.Message)
+	}
+}
+
+// TestCommandVerb_SkipExitIsOptIn_Live is the live NEGATIVE CONTROL: the SAME
+// real command, on a step that does NOT declare the code, is still a FAILURE.
+// The fake-exec twin of this case is TestCommandVerb_SkipExitIsOptIn; this one
+// removes the mock from the comparison, so the opt-in property is proven against
+// a process rather than a canned status.
+func TestCommandVerb_SkipExitIsOptIn_Live(t *testing.T) {
+	res := verb{}.RunVerb(context.Background(), &fakeCC{mode: kit.ModeLive},
+		&spec.Op{PluginInput: map[string]any{"command": "exit 3", "from_host": true}})
+	if res.Status != kit.StatusFail {
+		t.Fatalf("status = %v, want fail — an undeclared exit code is the author's to read, not the verb's", res.Status)
+	}
+}
+
+// TestCommandVerb_SkipExitPrecedenceOverExpectNonZero proves the precedence the
+// schema states: the skip is read FIRST, so a step declaring skip_exit together
+// with expect_non_zero means "exit this code → skipped; any other non-zero →
+// passed" — a wildcard narrowed by an exact exception, not a contradiction.
+// Only an EXACT-code contradiction (skip_exit and exit_status naming the same
+// code) is refused, and that is proven by the test above.
+func TestCommandVerb_SkipExitPrecedenceOverExpectNonZero(t *testing.T) {
+	code := sdk.CheckSkippedExitCode
+	skipped := runCommandVerb(code, map[string]any{"command": "exit 3", "skip_exit": code, "expect_non_zero": true}, nil)
+	if skipped.Status != kit.StatusSkip {
+		t.Fatalf("status = %v, want skip — the skip is read before the exit comparison: %s", skipped.Status, skipped.Message)
+	}
+	passed := runCommandVerb(1, map[string]any{"command": "exit 1", "skip_exit": code, "expect_non_zero": true}, nil)
+	if passed.Status != kit.StatusPass {
+		t.Fatalf("status = %v, want pass — any OTHER non-zero still satisfies expect_non_zero: %s", passed.Status, passed.Message)
 	}
 }

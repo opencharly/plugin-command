@@ -408,14 +408,33 @@ func TestCommandVerb_SkipExitContradictingExitStatusIsRefused(t *testing.T) {
 // TestCommandVerb_SkipExitWithBackgroundIsRefused proves a declaration that
 // could never take effect is refused instead of being silently inert: a
 // backgrounded command has no exit status to interpret.
+//
+// The assertion names SKIP_EXIT, not "background". The pre-existing background
+// refusals ("background: true is host-side only", "background command not
+// meaningful under charly check box") also say "background", so an assertion on
+// that word alone passes with the guard REMOVED — the test would not discriminate
+// the guard it exists to cover. The host-side case is the sharp one: with the
+// guard removed, a backgrounded step PASSES ("backgrounded pid=…"), so the
+// declaration would be silently inert — exactly what the guard prevents.
 func TestCommandVerb_SkipExitWithBackgroundIsRefused(t *testing.T) {
 	code := sdk.CheckSkippedExitCode
-	res := runCommandVerb(0, map[string]any{"command": "true", "skip_exit": code, "background": true}, nil)
-	if res.Status != kit.StatusFail {
-		t.Fatalf("status = %v, want fail — background: true has no exit status to skip on", res.Status)
+	cases := []struct {
+		name  string
+		input map[string]any
+	}{
+		{"in-container", map[string]any{"command": "true", "skip_exit": code, "background": true}},
+		{"host-side", map[string]any{"command": "true", "skip_exit": code, "background": true, "from_host": true}},
 	}
-	if !strings.Contains(res.Message, "background") {
-		t.Errorf("message = %q, want it to name the contradiction", res.Message)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := runCommandVerb(0, tc.input, nil)
+			if res.Status != kit.StatusFail {
+				t.Fatalf("status = %v, want fail — background: true has no exit status to skip on", res.Status)
+			}
+			if !strings.Contains(res.Message, "skip_exit") {
+				t.Errorf("message = %q, want it to name skip_exit — the pre-existing background refusals say \"background\" too, so that word alone would not discriminate this guard", res.Message)
+			}
+		})
 	}
 }
 
